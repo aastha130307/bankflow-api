@@ -4,9 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-  "start": "node server.js",
-  "test": "echo \"No tests configured\""
-},
+    "start": "node server.js",
+    "test": "echo \"No tests configured\""
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",

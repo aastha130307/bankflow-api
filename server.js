@@ -13,12 +13,45 @@ app.get("/", (req, res) => {
   });
 });
 
+async function sendMessageWithRetry(message, maxRetries = 3) {
+  let attempt = 0;
+
+  while (attempt <= maxRetries) {
+    try {
+      await sender.sendMessages(message);
+
+      console.log("✅ Message sent to Service Bus");
+      return;
+    } catch (error) {
+      attempt++;
+
+      console.error(
+        `❌ Service Bus send failed (attempt ${attempt}):`,
+        error.message
+      );
+
+      if (attempt > maxRetries) {
+        console.error("❌ All Service Bus retry attempts failed");
+        throw error;
+      }
+
+      const delay = Math.pow(2, attempt - 1) * 1000;
+
+      console.log(
+        `⏳ Retrying in ${delay / 1000} seconds...`
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
 
 app.post("/transactions", async (req, res) => {
   try {
     const { customerId, amount, transactionType, transactionStatus } = req.body;
 
-    if (!customerId || !amount || !transactionType) {
+    if (!customerId || amount===undefined || !transactionType) {
   return res.status(400).json({
     message: "customerId, amount and transactionType are required",
   });
@@ -39,7 +72,7 @@ if (!allowedTransactionTypes.includes(transactionType.toUpperCase())) {
   });
 }
 
-if (!allowedTransactionStatus.includes(transactionStatus.toUpperCase())) {
+if (!transactionStatus || !allowedTransactionStatus.includes(transactionStatus.toUpperCase())) {
   return res.status(400).json({
     message: "transactionStatus must be SUCCESS,PENDING OR FAILED",
   });
@@ -48,34 +81,45 @@ if (!allowedTransactionStatus.includes(transactionStatus.toUpperCase())) {
     const pool = await connectDB();
 
     const result = await pool
-      .request()
-      .input("customerId", sql.VarChar, customerId)
-      .input("amount", sql.Decimal(18, 2), amount)
-      .input("transactionType", sql.VarChar, transactionType.toUpperCase())
-      .input("transactionStatus",sql.VarChar,transactionStatus.toUpperCase())
-      .query(`
-        INSERT INTO Transactions
-        (customerId, amount, transactionType,transactionStatus)
-        OUTPUT INSERTED.*
-        VALUES
-        (@customerId, @amount, @transactionType, @transactionStatus)
-      `);
+  .request()
+  .input("customerId", sql.VarChar, customerId)
+  .input("amount", sql.Decimal(18, 2), amount)
+  .input("transactionType", sql.VarChar, transactionType.toUpperCase())
+  .input("transactionStatus", sql.VarChar, transactionStatus.toUpperCase())
+  .query(`
+    INSERT INTO Transactions
+    (customerId, amount, transactionType, transactionStatus)
+    OUTPUT INSERTED.*
+    VALUES
+    (@customerId, @amount, @transactionType, @transactionStatus)
+  `);
 
-      await sender.sendMessages({
-  body: {
-    customerId,
-    amount,
-    transactionType: transactionType.toUpperCase(),
-    transactionStatus: transactionStatus.toUpperCase(),
-  },
+const transaction = result.recordset[0];
+
+const messageBody = JSON.stringify({
+  customerId: transaction.customerId,
+  amount: transaction.amount,
+  transactionType: transaction.transactionType,
+  transactionStatus: transaction.transactionStatus,
 });
+
+await pool
+  .request()
+  .input("transactionId", sql.Int, transaction.id)
+  .input("messageBody", sql.NVarChar(sql.MAX), messageBody)
+  .query(`
+    INSERT INTO TransactionOutbox
+    (transactionId, messageBody)
+    VALUES
+    (@transactionId, @messageBody)
+  `);
 
 console.log("✅ Transaction sent to Service Bus");
 
     res.status(201).json({
-      message: "Transaction created successfully",
-      transaction: result.recordset[0],
-    });
+  message: "Transaction created successfully",
+  transaction,
+});
 
   } catch (error) {
     console.error("❌ Transaction error:", error.message);
